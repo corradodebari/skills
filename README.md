@@ -12,17 +12,17 @@ Collection of skills implemented to support developers on Oracle platforms relat
 
 | Category | Files | Path |
 |----------|-------|------|
-| [Database](#database) | 1 | `skills/graphrag-oracle-builder/` |
+| [Database](#database) | 1 | `skills/database/` |
 
 ---
 
 ## Database
 
-`skills/graphrag-oracle-builder/`
+`skills/database/`
 
 | File | Description |
 |------|-------------|
-| `SKILL.md` | Build a GraphRAG knowledge base from documents into an Oracle Property Graph (23ai–26ai).|
+| `graphrag-database-builder/SKILL.md` | Build a GraphRAG knowledge base from documents into an Oracle Property Graph (23ai–26ai).|
 
 ---
 
