@@ -1,0 +1,4 @@
+interface:
+  display_name: "GraphRAG Oracle Builder"
+  short_description: "Build Oracle GraphRAG from documents"
+  default_prompt: "Use $graphrag-oracle-builder to ingest my documents into an Oracle Property Graph for GraphRAG."

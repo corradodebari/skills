@@ -6,20 +6,6 @@
 Collection of skills implemented to support developers on Oracle platforms related projects. Each included guide has actionable examples, best practices, common pitfalls, sources, and explicit Oracle version compatibility notes.
 
 
----
-
-## Categories
-
-| Category | Skills | Path |
-|----------|--------|------|
-| [Database](#database) | 1 | `skills/database/` |
-
----
-
-## Database
-
-`skills/database/`
-
 | Directory | Description |
 |-----------|-------------|
 | [`graphrag-database-builder`](graphrag-database-builder/SKILL.md) | Build a GraphRAG knowledge base into an Oracle Property Graph (23ai–26ai) with embeddings from documents.|
