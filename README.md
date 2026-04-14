@@ -12,7 +12,7 @@ Collection of skills implemented to support developers on Oracle platforms relat
 
 | Category | Files | Path |
 |----------|-------|------|
-| [Database](#database-rag-graph) | 1 | `skills/graphrag-oracle-builder/` |
+| [Database](#database) | 1 | `skills/graphrag-oracle-builder/` |
 
 ---
 
