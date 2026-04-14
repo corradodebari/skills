@@ -10,8 +10,8 @@ Collection of skills implemented to support developers on Oracle platforms relat
 
 ## Categories
 
-| Category | Files | Path |
-|----------|-------|------|
+| Category | Skills | Path |
+|----------|--------|------|
 | [Database](#database) | 1 | `skills/database/` |
 
 ---
@@ -20,9 +20,9 @@ Collection of skills implemented to support developers on Oracle platforms relat
 
 `skills/database/`
 
-| File | Description |
-|------|-------------|
-| [`graphrag-database-builder`](graphrag-database-builder/SKILL.md) | Build a GraphRAG knowledge base from documents into an Oracle Property Graph (23ai–26ai).|
+| Directory | Description |
+|-----------|-------------|
+| [`graphrag-database-builder`](graphrag-database-builder/SKILL.md) | Build a GraphRAG knowledge base into an Oracle Property Graph (23ai–26ai) with embeddings from documents.|
 
 ---
 
