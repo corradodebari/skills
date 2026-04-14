@@ -5,11 +5,6 @@
 
 Collection of skills implemented to support developers on Oracle platforms related projects. Each included guide has actionable examples, best practices, common pitfalls, sources, and explicit Oracle version compatibility notes.
 
-## Version Coverage Standard
-
-- Skills that include version-specific behavior must include a section named `## Oracle Version Notes (19c vs 26ai)`.
-- Use Oracle Database 19c as the baseline compatibility target unless stated otherwise.
-- Explicitly call out features that require newer releases and provide 19c-compatible alternatives where practical.
 
 ---
 
