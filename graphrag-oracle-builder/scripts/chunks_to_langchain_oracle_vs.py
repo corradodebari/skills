@@ -71,6 +71,14 @@ def _load_oracle_vs_class():
             ) from exc
 
 
+def _load_distance_strategy():
+    try:
+        from langchain_community.vectorstores.oraclevs import DistanceStrategy  # type: ignore
+        return DistanceStrategy
+    except Exception:
+        return None
+
+
 def _load_embeddings_base():
     try:
         from langchain_core.embeddings import Embeddings  # type: ignore
@@ -95,33 +103,45 @@ def _build_embeddings_adapter(embed_model: str, ollama_url: str):
 
 
 def _store_chunks(oracle_vs_class, conn, texts: list[str], metadatas: list[dict], embeddings, table_name: str):
-    from_texts_attempts = [
-        {"client": conn, "table_name": table_name},
-        {"connection": conn, "table_name": table_name},
-    ]
+    distance_strategy = _load_distance_strategy()
+    kwargs = {"client": conn, "table_name": table_name}
+    if distance_strategy is not None:
+        kwargs["distance_strategy"] = distance_strategy.EUCLIDEAN_DISTANCE
 
-    last_exc: Exception | None = None
-    for kwargs in from_texts_attempts:
-        try:
-            return oracle_vs_class.from_texts(
-                texts=texts,
-                embedding=embeddings,
-                metadatas=metadatas,
-                **kwargs,
-            )
-        except Exception as exc:
-            last_exc = exc
+    return oracle_vs_class.from_texts(
+        texts=texts,
+        embedding=embeddings,
+        metadatas=metadatas,
+        **kwargs,
+    )
 
-    try:
-        store = oracle_vs_class(client=conn, embedding_function=embeddings, table_name=table_name)
-        store.add_texts(texts=texts, metadatas=metadatas)
-        return store
-    except Exception as exc:
-        last_exc = exc
 
-    raise RuntimeError(
-        "Failed to create/populate OracleVS with available constructor variants."
-    ) from last_exc
+def _table_exists(conn: oracledb.Connection, table_name: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM user_tables WHERE table_name = UPPER(:name)",
+            name=table_name,
+        )
+        row = cur.fetchone()
+    return bool(row and row[0] and int(row[0]) > 0)
+
+
+def _append_chunks_existing_table(
+    oracle_vs_class,
+    conn,
+    texts: list[str],
+    metadatas: list[dict],
+    embeddings,
+    table_name: str,
+):
+    distance_strategy = _load_distance_strategy()
+    kwargs = {"client": conn, "embedding_function": embeddings, "table_name": table_name}
+    if distance_strategy is not None:
+        kwargs["distance_strategy"] = distance_strategy.EUCLIDEAN_DISTANCE
+
+    store = oracle_vs_class(**kwargs)
+    store.add_texts(texts=texts, metadatas=metadatas)
+    return store
 
 
 def main() -> int:
@@ -173,18 +193,32 @@ def main() -> int:
     print("\nConnecting to Oracle …")
     conn = oracledb.connect(user=args.db_user, password=args.db_password, dsn=args.db_dsn)
     try:
-        print(
-            f"Storing {len(texts)} chunks in OracleVS table {args.table_name} "
-            f"using {embed_model} via Ollama …"
-        )
-        _store_chunks(
-            oracle_vs_class=OracleVS,
-            conn=conn,
-            texts=texts,
-            metadatas=metadatas,
-            embeddings=embeddings,
-            table_name=args.table_name,
-        )
+        if _table_exists(conn, args.table_name):
+            print(
+                f"Table {args.table_name} already exists. "
+                f"Appending {len(texts)} chunks using {embed_model} via Ollama …"
+            )
+            _append_chunks_existing_table(
+                oracle_vs_class=OracleVS,
+                conn=conn,
+                texts=texts,
+                metadatas=metadatas,
+                embeddings=embeddings,
+                table_name=args.table_name,
+            )
+        else:
+            print(
+                f"Table {args.table_name} does not exist. "
+                f"Creating and storing {len(texts)} chunks using {embed_model} via Ollama …"
+            )
+            _store_chunks(
+                oracle_vs_class=OracleVS,
+                conn=conn,
+                texts=texts,
+                metadatas=metadatas,
+                embeddings=embeddings,
+                table_name=args.table_name,
+            )
     finally:
         conn.close()
 

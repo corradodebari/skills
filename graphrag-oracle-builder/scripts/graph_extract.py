@@ -18,8 +18,12 @@ import os
 import sys
 from pathlib import Path
 
+import oracledb
+
 from file_to_chunks import chunk_document
 from graphrag_builder import (
+    _graph_exists,
+    get_existing_graph_types,
     enrich_schema_with_chunk_uuids,
     _ollama_generate,
     _ollama_list_models,
@@ -50,12 +54,33 @@ def _parse_schema_json(raw: str) -> dict:
         raise
 
 
-def _build_merged_prompt(prompt_template: str, chunks_payload: dict) -> str:
+def _build_existing_types_constraints(vertex_labels: list[str], edge_labels: list[str]) -> str:
+    vertex_list = ", ".join(vertex_labels) if vertex_labels else "(none)"
+    edge_list = ", ".join(edge_labels) if edge_labels else "(none)"
+    return (
+        "EXISTING GRAPH TYPE CONSTRAINTS\n"
+        "The target Oracle Property Graph already exists.\n"
+        "Extract only entities and relations that map to existing graph types.\n"
+        f"- Allowed vertex labels: {vertex_list}\n"
+        f"- Allowed edge labels: {edge_list}\n"
+        "Do not propose new vertex labels or new edge labels.\n"
+        "Discard evidence that cannot be represented with the allowed labels.\n"
+    )
+
+
+def _build_merged_prompt(
+    prompt_template: str,
+    chunks_payload: dict,
+    existing_constraints: str | None = None,
+) -> str:
     chunks = chunks_payload.get("chunks", [])
     if not isinstance(chunks, list):
         raise RuntimeError("Invalid output_chunks.json: 'chunks' must be a list.")
     payload_text = json.dumps(chunks_payload, ensure_ascii=False, indent=2)
-    return prompt_template.replace("{{INSERT_TEXT_CHUNKS_HERE}}", payload_text)
+    template = prompt_template
+    if existing_constraints:
+        template = existing_constraints + "\n\n" + template
+    return template.replace("{{INSERT_TEXT_CHUNKS_HERE}}", payload_text)
 
 
 def main() -> None:
@@ -109,7 +134,22 @@ def main() -> None:
         action="store_true",
         help="Only generate output_chunks.json and merged prompt file; skip schema extraction",
     )
+    parser.add_argument("--graph-name", default=None, help="Oracle Property Graph name to check before extraction")
+    parser.add_argument("--db-user", default=None, help="Oracle username for graph existence/type checks")
+    parser.add_argument("--db-password", default=None, help="Oracle password for graph existence/type checks")
+    parser.add_argument("--db-dsn", default=None, help="Oracle DSN for graph existence/type checks")
     args = parser.parse_args()
+
+    db_check_values = [args.db_user, args.db_password, args.db_dsn]
+    provided_db_fields = sum(1 for value in db_check_values if value)
+    if provided_db_fields not in (0, 3):
+        raise RuntimeError(
+            "For Oracle graph checks, provide all of --db-user, --db-password, and --db-dsn."
+        )
+    if args.graph_name and provided_db_fields != 3:
+        raise RuntimeError(
+            "--graph-name requires --db-user, --db-password, and --db-dsn for graph existence checks."
+        )
 
     llm_model = args.openai_model if args.llm_provider == "openai" else args.llm_model
     openai_api_key = os.getenv("OPENAI_API_KEY") if args.llm_provider == "openai" else None
@@ -156,27 +196,52 @@ def main() -> None:
     args.chunks_output.parent.mkdir(parents=True, exist_ok=True)
     write_chunks_json(source_names, chunk_entries, args.chunks_output)
 
-    print("\n[2/4] Building merged extraction prompt …")
+    existing_constraints: str | None = None
+    if args.graph_name and args.db_user and args.db_password and args.db_dsn:
+        print("\n[2/5] Checking target graph in Oracle DB …")
+        conn = oracledb.connect(user=args.db_user, password=args.db_password, dsn=args.db_dsn)
+        try:
+            if _graph_exists(conn, args.graph_name):
+                vertex_labels, edge_labels = get_existing_graph_types(conn, args.graph_name)
+                if not vertex_labels and not edge_labels:
+                    raise RuntimeError(
+                        f"Graph {args.graph_name} exists but no graph tables were discovered."
+                    )
+                existing_constraints = _build_existing_types_constraints(vertex_labels, edge_labels)
+                print(
+                    f"  Graph {args.graph_name} exists. "
+                    f"Using {len(vertex_labels)} vertex type(s) and {len(edge_labels)} edge type(s)."
+                )
+            else:
+                print(f"  Graph {args.graph_name} does not exist. Using default extraction flow.")
+        finally:
+            conn.close()
+
+    print("\n[3/5] Building merged extraction prompt …")
     prompt_path = args.prompt or (Path(__file__).parent / "prompt_text_to_graph.txt")
     prompt_template = prompt_path.read_text(encoding="utf-8")
     chunks_payload = json.loads(args.chunks_output.read_text(encoding="utf-8"))
-    merged_prompt = _build_merged_prompt(prompt_template, chunks_payload)
+    merged_prompt = _build_merged_prompt(
+        prompt_template,
+        chunks_payload,
+        existing_constraints=existing_constraints,
+    )
     args.merged_prompt_output.parent.mkdir(parents=True, exist_ok=True)
     args.merged_prompt_output.write_text(merged_prompt, encoding="utf-8")
     print(f"  Merged prompt saved: {args.merged_prompt_output.resolve()}")
 
     if args.skip_llm or args.llm_provider == "codex":
         if args.llm_provider == "codex":
-            print("\n[3/4] Codex provider selected — skipping in-script LLM extraction.")
+            print("\n[4/5] Codex provider selected — skipping in-script LLM extraction.")
         else:
-            print("\n[3/4] LLM extraction skipped (--skip-llm).")
+            print("\n[4/5] LLM extraction skipped (--skip-llm).")
         print(
-            f"[4/4] Prompt {args.merged_prompt_output.resolve()} with Codex and "
+            f"[5/5] Prompt {args.merged_prompt_output.resolve()} with Codex and "
             f"save the JSON schema to {args.schema_output.resolve()}"
         )
         return
 
-    print("\n[3/4] Extracting graph schema via LLM …")
+    print("\n[4/5] Extracting graph schema via LLM …")
     if args.llm_provider == "ollama":
         raw = _ollama_generate(merged_prompt, llm_model, args.ollama_url).strip()
     elif args.llm_provider == "openai":
@@ -201,7 +266,7 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    print("\n[4/4] Extraction output written.")
+    print("\n[5/5] Extraction output written.")
     print(f"  Schema JSON: {args.schema_output.resolve()}")
     print(f"  Vertex types: {len(schema.get('vertex', []))}")
     print(f"  Edge types: {len(schema.get('edge', []))}")

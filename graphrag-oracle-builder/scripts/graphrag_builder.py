@@ -504,10 +504,132 @@ def _table_exists(conn: oracledb.Connection, name: str) -> bool:
 def _graph_exists(conn: oracledb.Connection, name: str) -> bool:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT COUNT(*) FROM user_property_graphs WHERE graph_name = UPPER(:1)",
+            "SELECT COUNT(*) FROM user_property_graphs "
+            "WHERE UPPER(graph_name) = UPPER(:1)",
             [name],
         )
         return cur.fetchone()[0] > 0
+
+
+def _suffix_to_vertex_label(raw_suffix: str) -> str:
+    parts = [p for p in raw_suffix.strip().split("_") if p]
+    if not parts:
+        return ""
+    return "".join(part.capitalize() for part in parts)
+
+
+def _suffix_to_edge_label(raw_suffix: str) -> str:
+    parts = [p for p in raw_suffix.strip().split("_") if p]
+    if not parts:
+        return ""
+    return "_".join(part.upper() for part in parts)
+
+
+def get_existing_graph_types(conn: oracledb.Connection, graph_name: str) -> tuple[list[str], list[str]]:
+    """
+    Return existing vertex and edge labels discovered from this tool's table naming:
+      <GRAPH>_V_<label>, <GRAPH>_E_<label>
+    """
+    graph_prefix = graph_name.upper()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM user_tables "
+            "WHERE table_name LIKE :vprefix ESCAPE '\\' "
+            "   OR table_name LIKE :eprefix ESCAPE '\\'",
+            vprefix=f"{graph_prefix}_V_%",
+            eprefix=f"{graph_prefix}_E_%",
+        )
+        rows = cur.fetchall()
+
+    vertex_labels: list[str] = []
+    edge_labels: list[str] = []
+    v_prefix = f"{graph_prefix}_V_"
+    e_prefix = f"{graph_prefix}_E_"
+    for (table_name,) in rows:
+        if not isinstance(table_name, str):
+            continue
+        tname = table_name.upper()
+        if tname.startswith(v_prefix):
+            label = _suffix_to_vertex_label(tname[len(v_prefix):])
+            if label:
+                vertex_labels.append(label)
+        elif tname.startswith(e_prefix):
+            label = _suffix_to_edge_label(tname[len(e_prefix):])
+            if label:
+                edge_labels.append(label)
+
+    return (_ordered_unique(vertex_labels), _ordered_unique(edge_labels))
+
+
+def get_existing_edge_directions(
+    conn: oracledb.Connection, graph_name: str
+) -> dict[str, tuple[str, str]]:
+    """
+    Return edge FK direction for existing graph tables.
+    Maps edge label -> (src_vertex_label, dst_vertex_label) using table naming:
+      <GRAPH>_E_<edge_label>, <GRAPH>_V_<vertex_label>
+    """
+    graph_prefix = graph_name.upper()
+    e_prefix = f"{graph_prefix}_E_"
+    v_prefix = f"{graph_prefix}_V_"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              e.table_name,
+              sc.table_name AS src_parent,
+              dc.table_name AS dst_parent
+            FROM user_tables e
+            JOIN user_constraints sfk
+              ON sfk.table_name = e.table_name
+             AND sfk.constraint_type = 'R'
+            JOIN user_cons_columns scc
+              ON scc.constraint_name = sfk.constraint_name
+             AND scc.position = 1
+             AND UPPER(scc.column_name) = 'SRC_V_ID'
+            JOIN user_constraints sc
+              ON sc.constraint_name = sfk.r_constraint_name
+            JOIN user_constraints dfk
+              ON dfk.table_name = e.table_name
+             AND dfk.constraint_type = 'R'
+            JOIN user_cons_columns dcc
+              ON dcc.constraint_name = dfk.constraint_name
+             AND dcc.position = 1
+             AND UPPER(dcc.column_name) = 'DST_V_ID'
+            JOIN user_constraints dc
+              ON dc.constraint_name = dfk.r_constraint_name
+            WHERE e.table_name LIKE :edge_prefix ESCAPE '\\'
+            ORDER BY e.table_name
+            """,
+            edge_prefix=f"{e_prefix}%",
+        )
+        rows = cur.fetchall()
+
+    result: dict[str, tuple[str, str]] = {}
+    for edge_table, src_parent, dst_parent in rows:
+        if not isinstance(edge_table, str):
+            continue
+        edge_table_u = edge_table.upper()
+        if not edge_table_u.startswith(e_prefix):
+            continue
+        raw_edge_suffix = edge_table_u[len(e_prefix) :]
+        edge_label = _suffix_to_edge_label(raw_edge_suffix)
+        if not edge_label:
+            continue
+
+        if not isinstance(src_parent, str) or not isinstance(dst_parent, str):
+            continue
+        src_u = src_parent.upper()
+        dst_u = dst_parent.upper()
+        if not src_u.startswith(v_prefix) or not dst_u.startswith(v_prefix):
+            continue
+
+        src_label = _suffix_to_vertex_label(src_u[len(v_prefix) :])
+        dst_label = _suffix_to_vertex_label(dst_u[len(v_prefix) :])
+        if src_label and dst_label:
+            result[edge_label] = (src_label, dst_label)
+
+    return result
 
 
 def _pgql_label(label: str) -> str:
@@ -521,6 +643,20 @@ def _find_label_for_entity(schema: dict, entity_name: str) -> str | None:
         for prop in vertex.get("properties", []):
             if prop["name"] == entity_name:
                 return vertex["label"]
+    return None
+
+
+def _infer_entity_label(schema: dict, entity_name: str) -> str | None:
+    """
+    Infer the vertex label for a connection endpoint.
+    Supports both instance names and direct label usage.
+    """
+    label = _find_label_for_entity(schema, entity_name)
+    if label:
+        return label
+    vertex_labels = {str(v.get("label", "")) for v in schema.get("vertex", []) if isinstance(v, dict)}
+    if entity_name in vertex_labels:
+        return entity_name
     return None
 
 
@@ -769,6 +905,8 @@ def generate_sql_script(
     emb_dim: int,
     create_user_info: tuple[str, str] | None = None,
     force_recreate: bool = False,
+    append_only: bool = False,
+    edge_direction_overrides: dict[str, tuple[str, str]] | None = None,
 ) -> str:
     """
     Build a self-contained SQL script with DDL + DML (including TO_VECTOR embeddings).
@@ -812,7 +950,7 @@ def generate_sql_script(
         lines.append("COMMIT;")
 
     # ── Optional: drop existing objects ──────────────────────────────────────
-    if force_recreate:
+    if force_recreate and not append_only:
         section("DROP EXISTING OBJECTS (force-recreate)")
         lines.extend(
             [
@@ -835,74 +973,82 @@ def generate_sql_script(
             ]
         )
 
-    # ── Vertex tables DDL ─────────────────────────────────────────────────────
-    section("VERTEX TABLES")
-    for vertex in schema["vertex"]:
-        tname = vertex_table_name(vertex["label"])
-        lines.append(f"CREATE TABLE {tname} (")
-        lines.append(f"  v_id       NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,")
-        lines.append(f"  name       VARCHAR2(1000) NOT NULL,")
-        lines.append(f"  source_doc VARCHAR2(4000),")
-        lines.append(f"  uuids      CLOB,")
-        lines.append(f"  embedding  VECTOR({emb_dim}, FLOAT32)")
-        lines.append(f");")
-        lines.append("")
-
-    # ── Edge tables DDL ───────────────────────────────────────────────────────
     edge_connections = _build_edge_connections(schema)
-    section("EDGE TABLES")
-    for edge in schema["edge"]:
-        elabel = edge["label"]
-        tname = edge_table_name(elabel)
-        pair = edge_connections.get(elabel)
-        if not pair:
-            lines.append(f"-- [warn] No connections found for edge {elabel} — skipped")
-            continue
-        src_vtable = vertex_table_name(pair[0])
-        dst_vtable = vertex_table_name(pair[1])
-        lines.append(f"CREATE TABLE {tname} (")
-        lines.append(f"  edge_id     NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,")
-        lines.append(f"  src_v_id    NUMBER NOT NULL REFERENCES {src_vtable}(v_id),")
-        lines.append(f"  dst_v_id    NUMBER NOT NULL REFERENCES {dst_vtable}(v_id),")
-        lines.append(f"  description VARCHAR2(4000),")
-        lines.append(f"  uuids       CLOB,")
-        lines.append(f"  embedding   VECTOR({emb_dim}, FLOAT32)")
-        lines.append(f");")
-        lines.append("")
+    effective_edge_connections = dict(edge_connections)
+    if edge_direction_overrides:
+        effective_edge_connections.update(edge_direction_overrides)
+    if not append_only:
+        # ── Vertex tables DDL ─────────────────────────────────────────────────
+        section("VERTEX TABLES")
+        for vertex in schema["vertex"]:
+            tname = vertex_table_name(vertex["label"])
+            lines.append(f"CREATE TABLE {tname} (")
+            lines.append(f"  v_id       NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,")
+            lines.append(f"  name       VARCHAR2(1000) NOT NULL,")
+            lines.append(f"  source_doc VARCHAR2(4000),")
+            lines.append(f"  uuids      CLOB,")
+            lines.append(f"  embedding  VECTOR({emb_dim}, FLOAT32)")
+            lines.append(f");")
+            lines.append("")
 
-    # ── Property Graph DDL ────────────────────────────────────────────────────
-    section("PROPERTY GRAPH DDL")
-    vertex_clauses = []
-    for v in schema["vertex"]:
-        tname = vertex_table_name(v["label"])
-        vertex_clauses.append(
-            f"    {tname}\n      KEY (v_id)\n"
-            f"      LABEL {_pgql_label(v['label'])}\n"
-            f"      PROPERTIES (name, source_doc, uuids, embedding)"
+        # ── Edge tables DDL ───────────────────────────────────────────────────
+        section("EDGE TABLES")
+        for edge in schema["edge"]:
+            elabel = edge["label"]
+            tname = edge_table_name(elabel)
+            pair = effective_edge_connections.get(elabel)
+            if not pair:
+                lines.append(f"-- [warn] No connections found for edge {elabel} — skipped")
+                continue
+            src_vtable = vertex_table_name(pair[0])
+            dst_vtable = vertex_table_name(pair[1])
+            lines.append(f"CREATE TABLE {tname} (")
+            lines.append(f"  edge_id     NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,")
+            lines.append(f"  src_v_id    NUMBER NOT NULL REFERENCES {src_vtable}(v_id),")
+            lines.append(f"  dst_v_id    NUMBER NOT NULL REFERENCES {dst_vtable}(v_id),")
+            lines.append(f"  description VARCHAR2(4000),")
+            lines.append(f"  uuids       CLOB,")
+            lines.append(f"  embedding   VECTOR({emb_dim}, FLOAT32)")
+            lines.append(f");")
+            lines.append("")
+
+        # ── Property Graph DDL ────────────────────────────────────────────────
+        section("PROPERTY GRAPH DDL")
+        vertex_clauses = []
+        for v in schema["vertex"]:
+            tname = vertex_table_name(v["label"])
+            vertex_clauses.append(
+                f"    {tname}\n      KEY (v_id)\n"
+                f"      LABEL {_pgql_label(v['label'])}\n"
+                f"      PROPERTIES (name, source_doc, uuids, embedding)"
+            )
+        edge_clauses = []
+        for e in schema["edge"]:
+            elabel = e["label"]
+            pair = effective_edge_connections.get(elabel)
+            if not pair:
+                continue
+            tname = edge_table_name(elabel)
+            src_vtable = vertex_table_name(pair[0])
+            dst_vtable = vertex_table_name(pair[1])
+            edge_clauses.append(
+                f"    {tname}\n      KEY (edge_id)\n"
+                f"      SOURCE KEY (src_v_id) REFERENCES {src_vtable} (v_id)\n"
+                f"      DESTINATION KEY (dst_v_id) REFERENCES {dst_vtable} (v_id)\n"
+                f"      LABEL {_pgql_label(elabel)}\n"
+                f"      PROPERTIES (description, uuids, embedding)"
+            )
+        graph_ddl = (
+            f"CREATE PROPERTY GRAPH {graph_name}\n"
+            f"  VERTEX TABLES (\n" + ",\n".join(vertex_clauses) + "\n  )"
         )
-    edge_clauses = []
-    for e in schema["edge"]:
-        elabel = e["label"]
-        pair = edge_connections.get(elabel)
-        if not pair:
-            continue
-        tname = edge_table_name(elabel)
-        src_vtable = vertex_table_name(pair[0])
-        dst_vtable = vertex_table_name(pair[1])
-        edge_clauses.append(
-            f"    {tname}\n      KEY (edge_id)\n"
-            f"      SOURCE KEY (src_v_id) REFERENCES {src_vtable} (v_id)\n"
-            f"      DESTINATION KEY (dst_v_id) REFERENCES {dst_vtable} (v_id)\n"
-            f"      LABEL {_pgql_label(elabel)}\n"
-            f"      PROPERTIES (description, uuids, embedding)"
-        )
-    graph_ddl = (
-        f"CREATE PROPERTY GRAPH {graph_name}\n"
-        f"  VERTEX TABLES (\n" + ",\n".join(vertex_clauses) + "\n  )"
-    )
-    if edge_clauses:
-        graph_ddl += "\n  EDGE TABLES (\n" + ",\n".join(edge_clauses) + "\n  )"
-    lines.append(graph_ddl + ";")
+        if edge_clauses:
+            graph_ddl += "\n  EDGE TABLES (\n" + ",\n".join(edge_clauses) + "\n  )"
+        lines.append(graph_ddl + ";")
+    else:
+        section("APPEND MODE")
+        lines.append("-- Existing graph detected: this script only inserts new rows.")
+        lines.append("-- No CREATE TABLE / CREATE PROPERTY GRAPH statements are emitted.")
 
     # ── Vertex INSERT statements ──────────────────────────────────────────────
     section("INSERT VERTICES (with embeddings)")
@@ -921,10 +1067,18 @@ def generate_sql_script(
             safe_src = source_docs_str.replace("'", "''")
             uuids_json = _uuids_json_string(prop.get("uuids") or vertex.get("uuids"))
             safe_uuids = uuids_json.replace("'", "''")
-            lines.append(
-                f"INSERT INTO {tname} (name, source_doc, uuids, embedding) VALUES ("
-                f"'{safe_name}', '{safe_src}', '{safe_uuids}', {_vec_sql(vec, emb_dim)});"
-            )
+            if append_only:
+                lines.append(
+                    f"INSERT INTO {tname} (name, source_doc, uuids, embedding)\n"
+                    f"  SELECT '{safe_name}', '{safe_src}', '{safe_uuids}', {_vec_sql(vec, emb_dim)}\n"
+                    f"  FROM dual\n"
+                    f"  WHERE NOT EXISTS (SELECT 1 FROM {tname} WHERE name = '{safe_name}');"
+                )
+            else:
+                lines.append(
+                    f"INSERT INTO {tname} (name, source_doc, uuids, embedding) VALUES ("
+                    f"'{safe_name}', '{safe_src}', '{safe_uuids}', {_vec_sql(vec, emb_dim)});"
+                )
     lines.append("")
     lines.append("COMMIT;")
 
@@ -942,17 +1096,31 @@ def generate_sql_script(
             continue
         src_name, edge_label, dst_name = triple
         tname = edge_table_name(edge_label)
-        pair = edge_connections.get(edge_label)
+        pair = effective_edge_connections.get(edge_label)
         if not pair:
             lines.append(f"-- [warn] Skipping {edge_label}: no connection info")
             continue
+        src_name_eff, dst_name_eff = src_name, dst_name
+        if append_only and edge_direction_overrides and edge_label in edge_direction_overrides:
+            inferred_src = _infer_entity_label(schema, src_name)
+            inferred_dst = _infer_entity_label(schema, dst_name)
+            if inferred_src == pair[1] and inferred_dst == pair[0]:
+                src_name_eff, dst_name_eff = dst_name, src_name
+            elif inferred_src != pair[0] or inferred_dst != pair[1]:
+                lines.append(
+                    f"-- [warn] Skipping {edge_label}: triple endpoints "
+                    f"({src_name} -> {dst_name}) do not match existing FK direction "
+                    f"({pair[0]} -> {pair[1]})."
+                )
+                continue
+
         src_vtable = vertex_table_name(pair[0])
         dst_vtable = vertex_table_name(pair[1])
-        description = f"{src_name} {edge_label.replace('_', ' ').lower()} {dst_name}"
-        print(f"  Embedding [{edge_label}] {src_name} → {dst_name} …")
+        description = f"{src_name_eff} {edge_label.replace('_', ' ').lower()} {dst_name_eff}"
+        print(f"  Embedding [{edge_label}] {src_name_eff} → {dst_name_eff} …")
         vec = embed_fn(description)
-        safe_src = src_name.replace("'", "''")
-        safe_dst = dst_name.replace("'", "''")
+        safe_src = src_name_eff.replace("'", "''")
+        safe_dst = dst_name_eff.replace("'", "''")
         safe_desc = description.replace("'", "''")
         conn_uuids = []
         if isinstance(connection, dict):
@@ -960,17 +1128,37 @@ def generate_sql_script(
         if not conn_uuids:
             conn_uuids = edge_uuid_fallback.get(edge_label, [])
         safe_uuids = _uuids_json_string(conn_uuids).replace("'", "''")
-        lines.append(
-            f"INSERT INTO {tname} (src_v_id, dst_v_id, description, uuids, embedding)\n"
-            f"  SELECT (SELECT MIN(v_id) FROM {src_vtable} WHERE name = '{safe_src}'),\n"
-            f"         (SELECT MIN(v_id) FROM {dst_vtable} WHERE name = '{safe_dst}'),\n"
-            f"         '{safe_desc}',\n"
-            f"         '{safe_uuids}',\n"
-            f"         {_vec_sql(vec, emb_dim)}\n"
-            f"  FROM dual\n"
-            f"  WHERE EXISTS (SELECT 1 FROM {src_vtable} WHERE name = '{safe_src}')\n"
-            f"    AND EXISTS (SELECT 1 FROM {dst_vtable} WHERE name = '{safe_dst}');"
-        )
+        if append_only:
+            lines.append(
+                f"INSERT INTO {tname} (src_v_id, dst_v_id, description, uuids, embedding)\n"
+                f"  SELECT (SELECT MIN(v_id) FROM {src_vtable} WHERE name = '{safe_src}'),\n"
+                f"         (SELECT MIN(v_id) FROM {dst_vtable} WHERE name = '{safe_dst}'),\n"
+                f"         '{safe_desc}',\n"
+                f"         '{safe_uuids}',\n"
+                f"         {_vec_sql(vec, emb_dim)}\n"
+                f"  FROM dual\n"
+                f"  WHERE EXISTS (SELECT 1 FROM {src_vtable} WHERE name = '{safe_src}')\n"
+                f"    AND EXISTS (SELECT 1 FROM {dst_vtable} WHERE name = '{safe_dst}')\n"
+                f"    AND NOT EXISTS (\n"
+                f"      SELECT 1\n"
+                f"      FROM {tname} e\n"
+                f"      WHERE e.src_v_id = (SELECT MIN(v_id) FROM {src_vtable} WHERE name = '{safe_src}')\n"
+                f"        AND e.dst_v_id = (SELECT MIN(v_id) FROM {dst_vtable} WHERE name = '{safe_dst}')\n"
+                f"        AND e.description = '{safe_desc}'\n"
+                f"    );"
+            )
+        else:
+            lines.append(
+                f"INSERT INTO {tname} (src_v_id, dst_v_id, description, uuids, embedding)\n"
+                f"  SELECT (SELECT MIN(v_id) FROM {src_vtable} WHERE name = '{safe_src}'),\n"
+                f"         (SELECT MIN(v_id) FROM {dst_vtable} WHERE name = '{safe_dst}'),\n"
+                f"         '{safe_desc}',\n"
+                f"         '{safe_uuids}',\n"
+                f"         {_vec_sql(vec, emb_dim)}\n"
+                f"  FROM dual\n"
+                f"  WHERE EXISTS (SELECT 1 FROM {src_vtable} WHERE name = '{safe_src}')\n"
+                f"    AND EXISTS (SELECT 1 FROM {dst_vtable} WHERE name = '{safe_dst}');"
+            )
     lines.append("")
     lines.append("COMMIT;")
 
@@ -1077,9 +1265,21 @@ def main():
         description="GraphRAG Oracle Builder — chunk docs, extract graph, populate Oracle Property Graph + embeddings"
     )
     parser.add_argument("documents", nargs="+", type=Path, help="Input documents (Docling-supported formats)")
-    parser.add_argument("--db-user", default=None, help="Oracle username (not needed with --sql-output)")
-    parser.add_argument("--db-password", default=None, help="Oracle password (not needed with --sql-output)")
-    parser.add_argument("--db-dsn", default=None, help="Oracle DSN: host:port/service_name (not needed with --sql-output)")
+    parser.add_argument(
+        "--db-user",
+        default=None,
+        help="Oracle username (not needed with --sql-output; prefer SQLcl MCP when possible)",
+    )
+    parser.add_argument(
+        "--db-password",
+        default=None,
+        help="Oracle password (not needed with --sql-output; prefer SQLcl MCP when possible)",
+    )
+    parser.add_argument(
+        "--db-dsn",
+        default=None,
+        help="Oracle DSN: host:port/service_name (not needed with --sql-output; prefer SQLcl MCP when possible)",
+    )
     parser.add_argument("--graph-name", required=True, help="Oracle Property Graph name (uppercase recommended)")
     parser.add_argument(
         "--llm-provider",

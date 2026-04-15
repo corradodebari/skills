@@ -18,8 +18,12 @@ import os
 import sys
 from pathlib import Path
 
+import oracledb
+
 from graphrag_builder import (
     enrich_schema_with_chunk_uuids,
+    _graph_exists,
+    get_existing_edge_directions,
     _openai_embed,
     _ollama_embed,
     _ollama_list_models,
@@ -90,7 +94,46 @@ def main() -> None:
         action="store_true",
         help="Include user creation SQL block at top of generated file",
     )
+    parser.add_argument(
+        "--append-existing",
+        action="store_true",
+        help="Generate insert-only SQL for an already existing graph (no DDL, no recreate)",
+    )
+    parser.add_argument("--db-user", default=None, help="Oracle username for graph existence checks")
+    parser.add_argument("--db-password", default=None, help="Oracle password for graph existence checks")
+    parser.add_argument("--db-dsn", default=None, help="Oracle DSN for graph existence checks")
     args = parser.parse_args()
+    if args.append_existing and args.force_recreate:
+        raise RuntimeError("--append-existing cannot be combined with --force-recreate.")
+
+    db_check_values = [args.db_user, args.db_password, args.db_dsn]
+    provided_db_fields = sum(1 for value in db_check_values if value)
+    if provided_db_fields not in (0, 3):
+        raise RuntimeError(
+            "For Oracle graph checks, provide all of --db-user, --db-password, and --db-dsn."
+        )
+
+    edge_direction_overrides: dict[str, tuple[str, str]] = {}
+    if provided_db_fields == 3:
+        conn = oracledb.connect(user=args.db_user, password=args.db_password, dsn=args.db_dsn)
+        try:
+            exists = _graph_exists(conn, args.graph_name)
+            if exists:
+                edge_direction_overrides = get_existing_edge_directions(conn, args.graph_name)
+        finally:
+            conn.close()
+
+        if exists and not args.append_existing:
+            print(
+                f"[info] Graph {args.graph_name} already exists in USER_PROPERTY_GRAPHS; "
+                "forcing append-existing mode."
+            )
+            args.append_existing = True
+        elif not exists and args.append_existing:
+            raise RuntimeError(
+                f"Graph {args.graph_name} does not exist in USER_PROPERTY_GRAPHS; "
+                "--append-existing cannot be used."
+            )
 
     schema = _read_json(args.schema_input)
     chunks_payload = _read_json(args.chunks_input)
@@ -167,6 +210,8 @@ def main() -> None:
         emb_dim=args.embed_dim,
         create_user_info=create_user_info,
         force_recreate=args.force_recreate,
+        append_only=args.append_existing,
+        edge_direction_overrides=edge_direction_overrides if args.append_existing else None,
     )
     args.sql_output.parent.mkdir(parents=True, exist_ok=True)
     args.sql_output.write_text(sql_content, encoding="utf-8")
@@ -180,6 +225,7 @@ def main() -> None:
     print(f"Chunks input  : {args.chunks_input.resolve()}")
     print(f"Sources       : {source_docs_str}")
     print(f"Embeddings    : {embed_info}")
+    print(f"Mode          : {'append-existing (insert only)' if args.append_existing else 'create/update (DDL + inserts)'}")
     print("UUID field    : included (`uuids` JSON text on vertex/edge rows)")
     if create_user_info:
         print("User creation : included — run that block as DBA/SYSDBA first")
