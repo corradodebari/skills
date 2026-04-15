@@ -123,16 +123,7 @@ skill-installer from https://github.com/corradodebari/skills/tree/main/graphrag-
 
 ### Video Demo
 
-<iframe
-  width="960"
-  height="540"
-  src="https://www.youtube.com/embed/OXWeSPMDr_I?autoplay=1&mute=1&playsinline=1"
-  title="GraphRAG Oracle Builder Demo"
-  frameborder="0"
-  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-  referrerpolicy="strict-origin-when-cross-origin"
-  allowfullscreen>
-</iframe>
+YouTube demo: [video](https://youtu.be/OXWeSPMDr_I)
 
 ### A. Invoke from Codex
 Use prompts such as:
