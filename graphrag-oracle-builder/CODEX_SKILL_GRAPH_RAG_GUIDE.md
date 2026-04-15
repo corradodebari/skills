@@ -1,5 +1,15 @@
 # Codex Skill Guide: GraphRAG Oracle Builder
-
+<p align="center">
+  <a href="https://github.com/corradodebari/skills/tree/main/graphrag-oracle-builder">
+    <img alt="GitHub Repo" src="https://img.shields.io/badge/GitHub-Repo-181717?logo=github&logoColor=white">
+  </a>
+  <a href="https://www.oracle.com/database/">
+    <img alt="Oracle AI DB 26ai" src="https://img.shields.io/badge/Oracle-AI%20DB%2026ai-F80000?logo=oracle&logoColor=white">
+  </a>
+  <a href="https://openai.com/codex/">
+    <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-111111">
+  </a>
+</p>
 ## Purpose
 `graphrag-oracle-builder` is a Codex Skill that builds a **GraphRAG knowledge base** from unstructured documents and stores it in **Oracle AI Database 26ai Converged Database**.
 
