@@ -1,4 +1,5 @@
 # Codex Skill Guide: GraphRAG Oracle Builder
+
 <p align="center">
   <a href="https://github.com/corradodebari/skills/tree/main/graphrag-oracle-builder">
     <img alt="GitHub Repo" src="https://img.shields.io/badge/GitHub-Repo-181717?logo=github&logoColor=white">
@@ -10,6 +11,7 @@
     <img alt="Codex Skill" src="https://img.shields.io/badge/Codex-Skill-111111">
   </a>
 </p>
+
 ## Purpose
 `graphrag-oracle-builder` is a Codex Skill that builds a **GraphRAG knowledge base** from unstructured documents and stores it in **Oracle AI Database 26ai Converged Database**.
 
@@ -135,16 +137,18 @@ skill-installer from https://github.com/corradodebari/skills/tree/main/graphrag-
 
 YouTube demo: [video](https://youtu.be/OXWeSPMDr_I)
 
-### A. Invoke from Codex
+### Invoke from Codex
 Use prompts such as:
 
 - `Build GraphRAG in Oracle from these files: ...`
 - `Create the graph from my docs in graphrag-oracle-builder`
 - `Generate setup SQL only for a knowledge graph named MY_KG`
 
-Codex will guide required inputs (LLM provider, execution mode, Oracle user, user existence, input files), then run the skill pipeline.
+Codex will guide required inputs (LLM provider, execution mode, Oracle user, user existence, input files), then run the following skill pipeline.
 
-### 1. Prepare environment
+### Skill pipeline
+
+#### 1. Prepare environment
 From `graphrag-oracle-builder/`:
 
 ```bash
@@ -154,7 +158,7 @@ python -m pip install -U pip
 python -m pip install docling oracledb requests langchain-community
 ```
 
-### 2. Extract phase (chunk + schema artifacts)
+#### 2. Extract phase (chunk + schema artifacts)
 ```bash
 .venv/bin/python scripts/graph_extract.py \
   --llm-provider codex \
@@ -166,7 +170,7 @@ python -m pip install docling oracledb requests langchain-community
 
 In `codex` mode, use `temp/codex_prompt_chunks.txt` with Codex and save the JSON response to `temp/output_schema.json`.
 
-### 3. Store phase (generate Oracle SQL)
+#### 3. Store phase (generate Oracle SQL)
 ```bash
 .venv/bin/python scripts/graph_store.py \
   --schema-input temp/output_schema.json \
@@ -180,7 +184,7 @@ In `codex` mode, use `temp/codex_prompt_chunks.txt` with Codex and save the JSON
 
 To add documents to an existing graph, keep the same `--graph-name` and do not use `--force-recreate`.
 
-### 4. Execute SQL (only with explicit confirmation)
+#### 4. Execute SQL (only with explicit confirmation)
 Prefer SQLcl MCP first:
 
 ```text
@@ -190,7 +194,7 @@ mcp__sqlcl__run_sqlcl  sqlcl=@temp/graphrag_setup.sql
 
 If SQLcl MCP is unavailable, use direct `oracledb` execution as fallback.
 
-### 5. Mandatory: persist chunks to Oracle LangChain vector store
+#### 5. Mandatory: persist chunks to Oracle LangChain vector store
 ```bash
 .venv/bin/python scripts/chunks_to_langchain_oracle_vs.py \
   --chunks-input temp/output_chunks.json \
@@ -203,7 +207,7 @@ If SQLcl MCP is unavailable, use direct `oracledb` execution as fallback.
 
 Use the same embedding model family used in `graph_store.py` for retrieval consistency.
 
-### 6. Validate with a PGQL query
+#### 6. Validate with a PGQL query
 ```sql
 SELECT *
 FROM GRAPH_TABLE (
@@ -224,4 +228,3 @@ FROM GRAPH_TABLE (
 
 ## Disclaimer
 *The views expressed in this paper are my own and do not necessarily reflect the views of Oracle.*
-
