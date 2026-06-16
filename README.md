@@ -37,12 +37,6 @@ mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 cp -R microtx-workflows "${CODEX_HOME:-$HOME/.codex}/skills/"
 ```
 
-To keep the installed skill linked to this Git checkout, use a symlink instead of copying:
-
-```bash
-ln -s "$PWD/microtx-workflows" ~/.claude/skills/microtx-workflows
-ln -s "$PWD/microtx-workflows" "${CODEX_HOME:-$HOME/.codex}/skills/microtx-workflows"
-```
 
 ### Claude permissions
 
@@ -71,14 +65,14 @@ To speedup the execution as well for Codex, filesystem and network permissions b
 
 ```toml
 default_permissions = "microtx-workflows"
+
+[permissions.microtx-workflows]
 approval_policy = "on-request"
 
 [permissions.microtx-workflows.filesystem]
 ":minimal" = "read"
 "~/.codex/skills/microtx-workflows" = "read"
-
-[permissions.microtx-workflows.filesystem.":workspace_roots"]
-"." = "write"
+":workspace_roots" = "write"
 
 [permissions.microtx-workflows.network]
 enabled = true

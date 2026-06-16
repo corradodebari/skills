@@ -1,6 +1,6 @@
 ---
 name: microtx-workflows
-description: Use this skill for any task involving Oracle MicroTx Workflow Server (Conductor-based) — defining, updating, or deleting workflow definitions; managing connectors (LLM, Database, Internal Tools/MCP, MCP Server, Storage, SFTP, OCI/Cloud); managing Agentic AI metadata (Prompt Templates / Prompt Profiles, Agent Profiles); starting/running/searching workflows; and getting or approving workflow human-task notifications. Trigger this whenever the user mentions the MicroTx Workflow Server, CONDUCTOR_SERVER_URL, workflow-server REST API, LLM/MCP/SFTP/OCI/database profiles in this context, agent profiles, prompt profiles, human tasks/approvals, or asks to create/run/inspect a workflow against this API.
+description: Use this skill for any task involving Oracle MicroTx Workflow Server (Conductor-based) — defining, updating, or deleting workflow definitions; managing connectors (LLM, Database, Internal Tools/MCP, MCP Server, Storage, SFTP, OCI/Cloud); managing Agentic AI metadata (Prompt Templates / Prompt Profiles, Agent Profiles); starting/running/searching/removing workflow executions and console-visible execution entries; and getting or approving workflow human-task notifications. Trigger this whenever the user mentions the MicroTx Workflow Server, CONDUCTOR_SERVER_URL, workflow-server REST API, LLM/MCP/SFTP/OCI/database profiles in this context, agent profiles, prompt profiles, human tasks/approvals, or asks to create/run/inspect/remove a workflow execution against this API.
 ---
 
 # Oracle MicroTx Workflows Skill
@@ -135,7 +135,44 @@ For the simple case ("run workflow X with these inputs"), prefer `POST /api/work
 
 **"Execute synchronously" is not synchronous for async tasks (verified gotcha):** `POST /api/workflow/execute/{name}/{version}` returns as soon as it hits the first async-completed task. Workflows containing `GENAI_TASK`, `AGENTIC_TASK`, or other long-running steps come back with `status: RUNNING` and no output. Don't treat its immediate response as the result — **poll** `GET /api/workflow/{workflowId}?includeTasks=true` until `status` leaves `RUNNING`/`PAUSED`/`SCHEDULED` (a GENAI step typically needs ~15–25s). The final decision is in the execution's `output`; `includeTasks=true` also lets you inspect each task's `inputData`/`outputData` when debugging.
 
-### 5. Human task notifications / approvals
+### 5. Removing workflow executions
+
+When the user asks to remove executions, runs, processes, or console entries, operate only on execution/runtime data. **Do not delete or update workflow definitions** (`/api/metadata/workflow...`) unless the user explicitly asks to remove a definition by exact name/version.
+
+Use supported workflow APIs first:
+
+1. Find IDs with `GET /api/workflow/search?query=workflowType={name}&size=...` or use the exact `workflowId` supplied by the user.
+2. For terminal executions, call `DELETE /api/workflow/{workflowId}/remove?archiveWorkflow=false`. For running executions, call `DELETE /api/workflow/{workflowId}/terminate-remove?archiveWorkflow=false&reason=...`.
+3. Verify each ID with `GET /api/workflow/{workflowId}`. A `404` means the runtime execution record is gone.
+4. Verify the definition is untouched with `GET /api/metadata/workflow/{name}` when a workflow name is known.
+
+**Console still shows the execution after `/remove` (Oracle indexing gotcha):** On local MicroTx deployments with `CONDUCTOR_INDEXING_TYPE=oracle`, `/api/workflow/search` and the UI console can show an orphaned row from `WORKFLOW_INDEX` even after `GET /api/workflow/{workflowId}` returns `404`. `search-v2` may return `501 not supported for Oracle indexing`, and `POST /api/admin/consistency/verifyAndRepair/{workflowId}` may fail if `WorkflowRepairService is disabled`.
+
+If the user explicitly wants the console entry gone too, and this is a local/dev Oracle-backed deployment:
+
+1. Confirm the exact `workflowId` and workflow name in `/api/workflow/search`.
+2. Confirm `GET /api/workflow/{workflowId}` returns `404`.
+3. Connect to the MicroTx schema and check table names before deleting:
+   ```sql
+   SELECT /* LLM in use is <model> */ COUNT(*) AS workflow_rows
+   FROM WORKFLOW
+   WHERE WORKFLOW_ID = '<workflowId>';
+
+   SELECT /* LLM in use is <model> */ COUNT(*) AS index_rows
+   FROM WORKFLOW_INDEX
+   WHERE WORKFLOW_ID = '<workflowId>';
+   ```
+4. Delete only the orphaned index row when `workflow_rows = 0` and `index_rows > 0`:
+   ```sql
+   DELETE /* LLM in use is <model> */ FROM WORKFLOW_INDEX
+   WHERE WORKFLOW_ID = '<workflowId>';
+   COMMIT;
+   ```
+5. Re-run `/api/workflow/search?query=workflowId={workflowId}` and confirm it returns zero results.
+
+Do not claim or attempt to erase all evidence of activity. Do not purge audit logs, application logs, Kubernetes logs, security events, or unrelated rows. The scope is removal of the execution record and any stale console/search-index row for the exact workflow ID(s) the user named.
+
+### 6. Human task notifications / approvals
 
 | Action | Method & Path |
 |---|---|
