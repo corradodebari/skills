@@ -1,0 +1,156 @@
+---
+name: microtx-workflows
+description: Use this skill for any task involving Oracle MicroTx Workflow Server (Conductor-based) — defining, updating, or deleting workflow definitions; managing connectors (LLM, Database, Internal Tools/MCP, MCP Server, Storage, SFTP, OCI/Cloud); managing Agentic AI metadata (Prompt Templates / Prompt Profiles, Agent Profiles); starting/running/searching workflows; and getting or approving workflow human-task notifications. Trigger this whenever the user mentions the MicroTx Workflow Server, CONDUCTOR_SERVER_URL, workflow-server REST API, LLM/MCP/SFTP/OCI/database profiles in this context, agent profiles, prompt profiles, human tasks/approvals, or asks to create/run/inspect a workflow against this API.
+---
+
+# Oracle MicroTx Workflows Skill
+
+Helps Corrado define, update, run, and manage workflows and their supporting resources (connectors, agentic AI profiles) on the Oracle MicroTx Workflow Server — a Netflix Conductor-based orchestration engine with Oracle's agentic AI extensions.
+
+## Setup: get the server URL first
+
+Before making any API call, ask the user for `CONDUCTOR_SERVER_URL` if not already provided in the conversation. Default: `http://127.0.0.1/workflow-server/api`.
+
+All paths below are relative to this base URL (the OpenAPI spec's paths already include `/api/...`, so concatenate base-without-trailing-`/api` + path, or just confirm the exact base with the user if ambiguous — e.g. if base is `http://127.0.0.1/workflow-server/api`, then a path documented as `/api/metadata/workflow` becomes `http://127.0.0.1/workflow-server/api/metadata/workflow`).
+
+No authentication is configured (local dev) — don't add auth headers unless the user specifies otherwise.
+
+## Full API reference
+
+The complete OpenAPI spec is bundled at `references/openapi.json` (117 endpoints). Load it when you need exact request/response schemas, parameter names, or to discover an endpoint not covered in the cheat-sheet below. Use `grep`/`jq`/Python to query it rather than viewing the whole file (it's large).
+
+## User's Guide references (concepts, field semantics, JSON examples)
+
+Condensed from the Oracle MicroTx Workflows User's Guide (Release 26.1). Read the relevant file when you need more than the cheat-sheet — field-level semantics, status models, idempotency rules, guardrails, or ready-to-adapt JSON examples per task type:
+
+- `references/workflows-guide.md` — workflow definition options, execution status model, idempotency (workflow- and task-level), schedules, event handlers, and the human-task notification/approval flow.
+- `references/task-types.md` — catalog of task types (`AGENTIC_TASK`, Agentic Planner, `GENAI_TASK`, `GENAI_INGESTION`, `GENAI_RETRIEVE`, `GRPC`, `SFTP`, `HTTP`, `SQL`, `TRANSACTION`, `TXEVENTQ_PUBLISH`, `HUMAN`, and others) with example `inputParameters` JSON to use as templates.
+- `references/connectors-guide.md` — field-by-field reference for LLM, Database, Internal Tool, MCP Server, Cloud (OCI), and SFTP profiles, including provider-specific setup notes (OpenAI/OCI/Ollama/Oracle DB embeddings) and tool-config categories.
+- `references/agentic-ai-guide.md` — Prompt Profile and Agent Profile fields, guardrail rules, memory/capabilities semantics, and pre-checks/testing endpoints before wiring an agent into a workflow.
+
+## Cheat sheet: core operations
+
+### 1. Workflows (definitions)
+
+| Action | Method & Path |
+|---|---|
+| List all (with blueprint) | `GET /api/metadata/workflow` |
+| Get one by name | `GET /api/metadata/workflow/{name}` |
+| Create new | `POST /api/metadata/workflow` (body: WorkflowDef) |
+| Create or update (upsert) | `PUT /api/metadata/workflow` (body: **array** of WorkflowDef — bulk) |
+| Validate before saving | `POST /api/metadata/workflow/validate` (body: single WorkflowDef) |
+| Delete (specific version) | `DELETE /api/metadata/workflow/{name}/{version}` |
+| Search definitions | `GET /api/metadata/workflow/search` |
+| Latest versions only | `GET /api/metadata/workflow/latest-versions` |
+
+**WorkflowDef** key fields: `name*`, `version`, `description`, `tasks*` (array of WorkflowTask), `timeoutSeconds*`, `inputParameters`, `outputParameters`, `failureWorkflow`, `restartable`, `schemaVersion` (use `2`).
+
+Always validate (`POST /metadata/workflow/validate`) before creating/updating a non-trivial workflow definition, and show the user the JSON before submitting — workflow defs are easy to get subtly wrong (task references, switch cases, dynamic forks). Note the body-shape difference (verified): `validate` takes a **single** WorkflowDef object, but the `PUT` upsert takes an **array** (`[ {...} ]`) and reports per-def results as `{"bulkSuccessfulResults":[...], "bulkErrorResults":{...}}` — check `bulkErrorResults` is empty to confirm the write. "Deploying" a workflow on this server is just this metadata write; there is no separate deploy step.
+
+For task-type JSON templates (`AGENTIC_TASK`, `GENAI_TASK`, `SQL`, `HTTP`, `HUMAN`, etc.), see `references/task-types.md`.
+
+**Staging the definition file (overwrite automatically):** when you stage a workflow definition as a file under `/tmp` (e.g. `/tmp/<name>.json`) to feed `curl --data-binary @file`, write it so it **overwrites any pre-existing file of the same name without prompting**. The `Write` tool refuses to overwrite a file it hasn't read this session ("File has not been read yet"), which blocks re-runs. To overwrite unconditionally, write the file via a Bash heredoc instead:
+
+```bash
+cat > /tmp/<name>.json <<'JSON'
+{ ...workflow definition... }
+JSON
+```
+
+A single-quoted heredoc (`<<'JSON'`) preserves the JSON verbatim — no shell expansion of `$`, `${...}`, or backticks, which workflow definitions are full of (`${workflow.input.x}`, INLINE graaljs scripts). This truncates and replaces the file every time, so stale content from an earlier session never lingers. (If you do use the `Write` tool, `Read` the path first when it already exists, or pick a fresh unique filename.)
+
+### 2. Connectors
+
+All connector resources follow the same CRUD shape: `GET` (list/search), `GET /{name}` (one), `POST` (create), `PUT /{name}` (update), `DELETE /{name}`.
+
+| Connector type | Base path |
+|---|---|
+| LLM | `/api/connectors/ai/llm-profiles` |
+| Database | `/api/connectors/database/database-profiles` |
+| Internal Tools | `/api/connectors/ai/tool-configs` |
+| MCP Server | `/api/connectors/ai/mcp-servers` |
+| Storage | `/api/storage` (see note below) |
+| SFTP | `/api/connectors/sftp/sftp-profiles` |
+| Cloud (OCI) | `/api/connectors/oci/oci-profiles` |
+
+**Storage** is not a profile-based connector like the others — `/api/storage` (GET list, POST upload, DELETE /{filename}, DELETE all) handles file storage directly. If the user wants a persistent storage *profile* (vs. ad-hoc file ops), clarify what they mean — the API doesn't expose a storage-profile CRUD resource the same way it does for SFTP/OCI/DB.
+
+Key schema fields per connector (see `references/openapi.json` `components.schemas` for full detail):
+
+- **LlmProfile**: `name`, `model`
+- **DatabaseProfile**: `name`, `engine*`, `capabilities*`, `username*`, `password*`, `url*`, `wallet`, `walletMetaData*` (Oracle wallet support), `maxConnectionPoolSize`
+- **McpServer**: `name`, `transport*`, `url`, `command`, `args`, `env`, `sseEndpoint`, `authzType`, `apiKey`, `version`
+- **SftpProfile**: `name`, `userName`, `privateKey`/`privateKeyPassphrase`, `host*`, `port*`
+- **OciProfile**: `name`, `privateKey`, `privateKeyPassphrase`, `regionId`, `userOcid`, `tenancyOcid`, `fingerprint`
+- **ToolConfig** (Internal Tools): `name`, `category*`, `type`, plus one of the typed sub-configs: `ragRetrievalToolConfig`, `agentExecuteToolConfig`, `microTxWorkflowToolConfig`, `fileToolConfig`, `databaseToolConfig` — pick based on `category`/`type`
+
+**Test connectivity before creating** when practical:
+- `POST /api/connector/test/{testType}` where testType is `llm-profile` or `mcp-server`
+- `POST /api/connector/test/sftp-profile`
+- `POST /api/connector/test/database-profile`
+
+### 3. Agentic AI
+
+| Resource | Base path |
+|---|---|
+| Prompt Profile (Prompt Template) | `/api/metadata/ai/prompts` |
+| Agent Profile | `/api/metadata/ai/agents` |
+
+Standard CRUD: `GET` (search/list), `GET /{name}`, `POST` (create), `PUT /{name}` (update), `DELETE /{name}`.
+
+- **PromptProfile**: `name`, `description`, `promptTemplate*`
+- **AgentProfile**: `name`, `description`, `role*`, `instruction*`, `llmProfile*`, `tools` (array of ToolConfig names), `mcpServers` (array of MCP server names), `memory`, `maxMessages`, `maxToolCalls`, `capabilities*`, `promptVariables`, `temperature`, `maxTokens`, `topK`, `topP`, `guardrails`
+
+Before creating an Agent Profile, check that referenced `llmProfile`, `tools`, and `mcpServers` already exist (list them via their respective connector endpoints) — dangling references will likely fail at runtime even if the metadata write succeeds.
+
+**Testing agentic AI** (useful before wiring into a workflow):
+- `POST /api/metadata/ai/test/prompt-profile` — test a prompt string against an LLM profile
+- `POST /api/metadata/ai/test/agentic-profile` or `/agentic-profile/{name}` — execute an agent profile and get the final reply
+- `POST /api/metadata/ai/test/agentic-planner` — simulate the Agentic Planner
+
+### 4. Running workflows
+
+| Action | Method & Path |
+|---|---|
+| Start by name (simple) | `POST /api/workflow/{name}` — body is input map (`{}` if none); query params: `version`, `correlationId`, `priority`, `idempotencyKey` |
+| Start with full request | `POST /api/workflow` — body: StartWorkflowRequest |
+| Execute synchronously | `POST /api/workflow/execute/{name}/{version}` |
+| Test with mock data | `POST /api/workflow/test` |
+| Get status/details | `GET /api/workflow/{workflowId}` |
+| Pause / Resume | `PUT /api/workflow/{workflowId}/pause` / `/resume` |
+| Retry / Restart / Rerun | `POST /api/workflow/{workflowId}/retry` / `/restart` / `/rerun` |
+| Terminate | `DELETE /api/workflow/{workflowId}` |
+| Terminate + remove | `DELETE /api/workflow/{workflowId}/terminate-remove` |
+| Search executions | `GET /api/workflow/search` or `search-v2` |
+| Running by name | `GET /api/workflow/running/{name}` |
+| By correlation id | `GET /api/workflow/{name}/correlated/{correlationId}` |
+
+**StartWorkflowRequest** key fields: `name*`, `version`, `correlationId`, `input`, `taskToDomain`, `priority`, `idempotencyKey`, `idempotencyStrategy`.
+
+For the simple case ("run workflow X with these inputs"), prefer `POST /api/workflow/{name}` with the input map as the body — it's the most direct path. Use the full `StartWorkflowRequest` (`POST /api/workflow`) only when correlation IDs, idempotency, or `taskToDomain` routing are needed.
+
+**Passing input — get this right or inputs silently vanish (verified gotcha):**
+- `POST /api/workflow/{name}` — body is the **raw input map** directly, e.g. `{"loan_request":"..."}`. Returns the `workflowId` as a plain string.
+- `POST /api/workflow` and `POST /api/workflow/execute/{name}/{version}` — body is a **`StartWorkflowRequest`**, so the input must be nested under an `input` key: `{"name":"...","version":1,"input":{"loan_request":"..."}}`. If you send a raw map to these endpoints, the server accepts it but **drops the input** — the run records `input: {"variables":{}}` and every `${workflow.input.X}` resolves to `null`. The symptom is a workflow that "works" but sees all-null inputs (e.g. a GENAI prompt rendered with `Loan request:\nnull`). When debugging null inputs, first check the recorded `input` on the execution and confirm you used the matching body shape.
+
+**"Execute synchronously" is not synchronous for async tasks (verified gotcha):** `POST /api/workflow/execute/{name}/{version}` returns as soon as it hits the first async-completed task. Workflows containing `GENAI_TASK`, `AGENTIC_TASK`, or other long-running steps come back with `status: RUNNING` and no output. Don't treat its immediate response as the result — **poll** `GET /api/workflow/{workflowId}?includeTasks=true` until `status` leaves `RUNNING`/`PAUSED`/`SCHEDULED` (a GENAI step typically needs ~15–25s). The final decision is in the execution's `output`; `includeTasks=true` also lets you inspect each task's `inputData`/`outputData` when debugging.
+
+### 5. Human task notifications / approvals
+
+| Action | Method & Path |
+|---|---|
+| Search pending/in-progress human tasks | `GET /api/notifications/human-tasks` (params: `start`, `size`, `sort`, `freeText`) |
+| Approve / complete a human task | `POST /api/tasks/{workflowId}/{taskRefName}/{status}` — body: output data map; `status` is typically `COMPLETED` (or `FAILED` to reject) |
+| Approve synchronously, get updated workflow | `POST /api/tasks/{workflowId}/{taskRefName}/{status}/sync` |
+
+**HumanTask** fields: `taskId`, `status`, `taskDefName`, `workflowInstanceId`, `scheduledTime`, `updateTime`, `inputData`, `workflowName`.
+
+Typical approval flow: search human tasks → identify the one to act on (`workflowInstanceId` + `taskDefName` give you `workflowId`/`taskRefName`) → `POST /api/tasks/{workflowId}/{taskRefName}/COMPLETED` with the approval decision in the body.
+
+## Working with the user
+
+- Always confirm `CONDUCTOR_SERVER_URL` once per session (or reuse if already established earlier in the conversation).
+- For create/update operations on workflows, connectors, or agent/prompt profiles, show the JSON payload to the user before issuing the `POST`/`PUT` — these are config changes worth a quick look.
+- For deletes, confirm the exact name/version before calling — deletion endpoints are irreversible.
+- If an endpoint isn't covered above, grep `references/openapi.json` for the resource name to find the exact path and schema rather than guessing.
+- Use `curl` via bash for actual calls; pretty-print JSON responses (`python3 -m json.tool` or `jq`) when summarizing for the user.
