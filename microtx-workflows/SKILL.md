@@ -5,7 +5,7 @@ description: Use this skill for any task involving Oracle MicroTx Workflow Serve
 
 # Oracle MicroTx Workflows Skill
 
-Helps Corrado define, update, run, and manage workflows and their supporting resources (connectors, agentic AI profiles) on the Oracle MicroTx Workflow Server — a Netflix Conductor-based orchestration engine with Oracle's agentic AI extensions.
+Helps define, update, run, and manage workflows and their supporting resources (connectors, agentic AI profiles) on the Oracle MicroTx Workflow Server — a Netflix Conductor-based orchestration engine with Oracle's agentic AI extensions.
 
 ## Setup: get the server URL first
 
