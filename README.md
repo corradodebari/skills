@@ -21,26 +21,20 @@ cd skills
 ```
 
 Install a skill by copying its directory into the target assistant's skills folder.
-For example, to install `microtx-workflows`:
+
+## microtx-workflows
 
 ### Claude
+From project root:
 
 ```bash
 mkdir -p ~/.claude/skills
 cp -R microtx-workflows ~/.claude/skills/
 ```
 
-### Codex
+#### Claude permissions
 
-```bash
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
-cp -R microtx-workflows "${CODEX_HOME:-$HOME/.codex}/skills/"
-```
-
-
-### Claude permissions
-
-To speedup the execution, for Claude, merge the following permissions into `~/.claude/settings.json` if you want the skill to read its bundled references and call a local MicroTx Workflow Server without repeated prompts:
+To speedup the sessions, merge the following permissions into `~/.claude/settings.json` if you want the skill to read its bundled references and call a local MicroTx Workflow Server without repeated prompts:
 
 ```json
 {
@@ -59,7 +53,15 @@ To speedup the execution, for Claude, merge the following permissions into `~/.c
 
 Adjust the `Read(...)` path if you installed the skill somewhere other than `[YOUR_HOME_DIR]/.claude/skills/microtx-workflows`.
 
-### Codex permissions
+### Codex
+From project root:
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R microtx-workflows "${CODEX_HOME:-$HOME/.codex}/skills/"
+```
+
+#### Codex permissions
 
 To speedup the execution as well for Codex, filesystem and network permissions belong in `${CODEX_HOME:-$HOME/.codex}/config.toml`. Add a permission profile like this:
 
@@ -100,12 +102,6 @@ prefix_rule(
     justification = "Allow local Python helpers for JSON formatting and OpenAPI inspection.",
 )
 ```
-
-Codex rules match command prefixes, not URL glob patterns inside an argument. The `curl` rule above is therefore broader than Claude's `curl http://127.0.0.1/workflow-server/api*` allow entries; omit it if you prefer Codex to keep prompting for curl commands.
-
-Restart Claude or Codex after installation so the new skill metadata is loaded.
-
----
 
 
 ---
