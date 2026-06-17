@@ -45,7 +45,8 @@ To speedup the sessions, merge the following permissions into `~/.claude/setting
       "Bash(curl -X GET http://127.0.0.1/workflow-server/api*)",
       "Bash(curl -s -X GET http://127.0.0.1/workflow-server/api*)",
       "Read([YOUR_HOME_DIR]/.claude/skills/microtx-workflows/**/*.md)",
-      "Bash(python3 *)"
+      "Bash(python3 *),
+      "Bash(rg:*)"
     ]
   }
 }
