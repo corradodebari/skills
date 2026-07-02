@@ -1,11 +1,11 @@
 ---
 name: microtx-workflows
-description: Use this skill for any task involving Oracle MicroTx Workflow Server (Conductor-based) — defining, updating, or deleting workflow definitions; managing connectors (LLM, Database, Internal Tools/MCP, MCP Server, Storage, SFTP, OCI/Cloud); managing Agentic AI metadata (Prompt Templates / Prompt Profiles, Agent Profiles); starting/running/searching/removing workflow executions and console-visible execution entries; and getting or approving workflow human-task notifications. Trigger this whenever the user mentions the MicroTx Workflow Server, CONDUCTOR_SERVER_URL, workflow-server REST API, LLM/MCP/SFTP/OCI/database profiles in this context, agent profiles, prompt profiles, human tasks/approvals, or asks to create/run/inspect/remove a workflow execution against this API.
+description: Use this skill for any task involving Oracle MicroTx or Oracle MicroTx Workflow Server (Conductor-based) — installing/configuring MicroTx; planning Kubernetes, Docker Compose, local Docker, identity provider, Istio, datastore, console, upgrade, or environment-variable setup; defining, updating, or deleting workflow definitions; managing connectors (LLM, Database, Internal Tools/MCP, MCP Server, Storage, SFTP, OCI/Cloud); managing Agentic AI metadata (Prompt Templates / Prompt Profiles, Agent Profiles); starting/running/searching/removing workflow executions and console-visible execution entries; and getting or approving workflow human-task notifications. Trigger this whenever the user mentions MicroTx installation/configuration, the MicroTx Workflow Server, CONDUCTOR_SERVER_URL, workflow-server REST API, LLM/MCP/SFTP/OCI/database profiles in this context, agent profiles, prompt profiles, human tasks/approvals, or asks to create/run/inspect/remove a workflow execution against this API.
 ---
 
 # Oracle MicroTx Workflows Skill
 
-Helps define, update, run, and manage workflows and their supporting resources (connectors, agentic AI profiles) on the Oracle MicroTx Workflow Server — a Netflix Conductor-based orchestration engine with Oracle's agentic AI extensions.
+Helps install and configure Oracle MicroTx, and define, update, run, and manage workflows and their supporting resources (connectors, agentic AI profiles) on the Oracle MicroTx Workflow Server — a Netflix Conductor-based orchestration engine with Oracle's agentic AI extensions.
 
 ## Setup: get the server URL first
 
@@ -13,11 +13,15 @@ Before making any API call, ask the user for `CONDUCTOR_SERVER_URL` if not alrea
 
 All paths below are relative to this base URL (the OpenAPI spec's paths already include `/api/...`, so concatenate base-without-trailing-`/api` + path, or just confirm the exact base with the user if ambiguous — e.g. if base is `http://127.0.0.1/workflow-server/api`, then a path documented as `/api/metadata/workflow` becomes `http://127.0.0.1/workflow-server/api/metadata/workflow`).
 
-No authentication is configured (local dev) — don't add auth headers unless the user specifies otherwise.
+Authentication: only assume "no auth" for explicit local/loopback development URLs such as `127.0.0.1`, `localhost`, or a user-confirmed local tunnel. For any remote, shared, cluster, or production-looking URL, ask the user what authentication is required before making API calls. Never invent auth headers, and never print, store, or commit credentials supplied for connector/API setup.
 
 ## Full API reference
 
 The complete OpenAPI spec is bundled at `references/openapi.json` (117 endpoints). Load it when you need exact request/response schemas, parameter names, or to discover an endpoint not covered in the cheat-sheet below. Use `grep`/`jq`/Python to query it rather than viewing the whole file (it's large).
+
+## Installation and configuration guide
+
+The Oracle MicroTx Installation and Configuration Guide is bundled at `references/oracle-microtx-installation-and-configuration-guide.pdf`, with a routing/index companion at `references/installation-guide.md`. Read `references/installation-guide.md` whenever the user asks to install, configure, plan, or upgrade MicroTx. Inspect the PDF itself when exact commands, supported platforms, required YAML keys, Kubernetes/Istio steps, identity-provider setup, datastore setup, Docker Compose instructions, local Docker instructions, upgrade steps, or environment variables are needed.
 
 ## User's Guide references (concepts, field semantics, JSON examples)
 
@@ -49,19 +53,22 @@ Always validate (`POST /metadata/workflow/validate`) before creating/updating a 
 
 For task-type JSON templates (`AGENTIC_TASK`, `GENAI_TASK`, `SQL`, `HTTP`, `HUMAN`, etc.), see `references/task-types.md`.
 
-**Staging the definition file (overwrite automatically):** when you stage a workflow definition as a file under `/tmp` (e.g. `/tmp/<name>.json`) to feed `curl --data-binary @file`, write it so it **overwrites any pre-existing file of the same name without prompting**. The `Write` tool refuses to overwrite a file it hasn't read this session ("File has not been read yet"), which blocks re-runs. To overwrite unconditionally, write the file via a Bash heredoc instead:
+**Staging the definition file safely:** when you stage a workflow definition to feed `curl --data-binary @file`, use a fresh temporary file rather than a predictable path such as `/tmp/<name>.json`. Predictable names can clobber unrelated files and are more exposed to symlink/path-confusion issues. Use `mktemp`, then write the JSON with a single-quoted heredoc:
 
 ```bash
-cat > /tmp/<name>.json <<'JSON'
+payload_file="$(mktemp "${TMPDIR:-/tmp}/microtx-workflow.XXXXXX.json")"
+cat > "$payload_file" <<'JSON'
 { ...workflow definition... }
 JSON
 ```
 
-A single-quoted heredoc (`<<'JSON'`) preserves the JSON verbatim — no shell expansion of `$`, `${...}`, or backticks, which workflow definitions are full of (`${workflow.input.x}`, INLINE graaljs scripts). This truncates and replaces the file every time, so stale content from an earlier session never lingers. (If you do use the `Write` tool, `Read` the path first when it already exists, or pick a fresh unique filename.)
+A single-quoted heredoc (`<<'JSON'`) preserves the JSON verbatim — no shell expansion of `$`, `${...}`, or backticks, which workflow definitions are full of (`${workflow.input.x}`, INLINE graaljs scripts). Remove the temporary file after the API call if it contains sensitive workflow inputs. If you must use the `Write` tool, pick a fresh unique filename or read the existing path first before overwriting it.
 
 ### 2. Connectors
 
 All connector resources follow the same CRUD shape: `GET` (list/search), `GET /{name}` (one), `POST` (create), `PUT /{name}` (update), `DELETE /{name}`.
+
+Treat connector payloads as secret-bearing whenever they include API keys, passwords, private keys, wallet fields, database URLs, or bearer tokens. Do not echo full payloads containing secrets back to the user; show redacted JSON (`"***"`) for review and send the real values only in the API request when the user has supplied them for that purpose.
 
 | Connector type | Base path |
 |---|---|
@@ -73,7 +80,7 @@ All connector resources follow the same CRUD shape: `GET` (list/search), `GET /{
 | SFTP | `/api/connectors/sftp/sftp-profiles` |
 | Cloud (OCI) | `/api/connectors/oci/oci-profiles` |
 
-**Storage** is not a profile-based connector like the others — `/api/storage` (GET list, POST upload, DELETE /{filename}, DELETE all) handles file storage directly. If the user wants a persistent storage *profile* (vs. ad-hoc file ops), clarify what they mean — the API doesn't expose a storage-profile CRUD resource the same way it does for SFTP/OCI/DB.
+**Storage** is not a profile-based connector like the others — `/api/storage` (GET list, POST upload, DELETE /{filename}, DELETE all) handles file storage directly. If the user wants a persistent storage *profile* (vs. ad-hoc file ops), clarify what they mean — the API doesn't expose a storage-profile CRUD resource the same way it does for SFTP/OCI/DB. Require explicit confirmation immediately before storage deletion, especially `deleteAll`.
 
 Key schema fields per connector (see `references/openapi.json` `components.schemas` for full detail):
 
@@ -139,16 +146,18 @@ For the simple case ("run workflow X with these inputs"), prefer `POST /api/work
 
 When the user asks to remove executions, runs, processes, or console entries, operate only on execution/runtime data. **Do not delete or update workflow definitions** (`/api/metadata/workflow...`) unless the user explicitly asks to remove a definition by exact name/version.
 
+Before any destructive workflow call, restate the exact target and get confirmation in the current turn. This includes workflow definition name/version, workflow ID, execution removal/termination, connector/profile name, storage filename or `deleteAll`, chat-history agent/session, and human-task failure/rejection.
+
 Use supported workflow APIs first:
 
 1. Find IDs with `GET /api/workflow/search?query=workflowType={name}&size=...` or use the exact `workflowId` supplied by the user.
-2. For terminal executions, call `DELETE /api/workflow/{workflowId}/remove?archiveWorkflow=false`. For running executions, call `DELETE /api/workflow/{workflowId}/terminate-remove?archiveWorkflow=false&reason=...`.
+2. After confirmation, for terminal executions call `DELETE /api/workflow/{workflowId}/remove?archiveWorkflow=false`. For running executions, call `DELETE /api/workflow/{workflowId}/terminate-remove?archiveWorkflow=false&reason=...`.
 3. Verify each ID with `GET /api/workflow/{workflowId}`. A `404` means the runtime execution record is gone.
 4. Verify the definition is untouched with `GET /api/metadata/workflow/{name}` when a workflow name is known.
 
 **Console still shows the execution after `/remove` (Oracle indexing gotcha):** On local MicroTx deployments with `CONDUCTOR_INDEXING_TYPE=oracle`, `/api/workflow/search` and the UI console can show an orphaned row from `WORKFLOW_INDEX` even after `GET /api/workflow/{workflowId}` returns `404`. `search-v2` may return `501 not supported for Oracle indexing`, and `POST /api/admin/consistency/verifyAndRepair/{workflowId}` may fail if `WorkflowRepairService is disabled`.
 
-If the user explicitly wants the console entry gone too, and this is a local/dev Oracle-backed deployment:
+If the user explicitly wants the console entry gone too, and this is a local/dev Oracle-backed deployment, prefer supported API/admin repair paths when available. Use direct SQL only as a last resort for an orphaned search-index row:
 
 1. Confirm the exact `workflowId` and workflow name in `/api/workflow/search`.
 2. Confirm `GET /api/workflow/{workflowId}` returns `404`.
@@ -162,13 +171,14 @@ If the user explicitly wants the console entry gone too, and this is a local/dev
    FROM WORKFLOW_INDEX
    WHERE WORKFLOW_ID = '<workflowId>';
    ```
-4. Delete only the orphaned index row when `workflow_rows = 0` and `index_rows > 0`:
+4. Show the counts to the user and get explicit approval immediately before SQL deletion.
+5. Delete only the orphaned index row when `workflow_rows = 0`, `index_rows > 0`, and the user has approved the exact `workflowId`:
    ```sql
    DELETE /* LLM in use is <model> */ FROM WORKFLOW_INDEX
    WHERE WORKFLOW_ID = '<workflowId>';
    COMMIT;
    ```
-5. Re-run `/api/workflow/search?query=workflowId={workflowId}` and confirm it returns zero results.
+6. Re-run `/api/workflow/search?query=workflowId={workflowId}` and confirm it returns zero results.
 
 Do not claim or attempt to erase all evidence of activity. Do not purge audit logs, application logs, Kubernetes logs, security events, or unrelated rows. The scope is removal of the execution record and any stale console/search-index row for the exact workflow ID(s) the user named.
 
@@ -187,7 +197,7 @@ Typical approval flow: search human tasks → identify the one to act on (`workf
 ## Working with the user
 
 - Always confirm `CONDUCTOR_SERVER_URL` once per session (or reuse if already established earlier in the conversation).
-- For create/update operations on workflows, connectors, or agent/prompt profiles, show the JSON payload to the user before issuing the `POST`/`PUT` — these are config changes worth a quick look.
-- For deletes, confirm the exact name/version before calling — deletion endpoints are irreversible.
+- For create/update operations on workflows, connectors, or agent/prompt profiles, show the JSON payload to the user before issuing the `POST`/`PUT` — redact secret values before displaying.
+- For destructive operations, confirm the exact target immediately before calling. Cover definition name/version, workflow ID, connector/profile name, storage filename or `deleteAll`, chat-history agent/session, human-task failure/rejection, and any direct SQL cleanup.
 - If an endpoint isn't covered above, grep `references/openapi.json` for the resource name to find the exact path and schema rather than guessing.
 - Use `curl` via bash for actual calls; pretty-print JSON responses (`python3 -m json.tool` or `jq`) when summarizing for the user.
